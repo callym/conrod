@@ -9,9 +9,20 @@ use gfx_core;
 use gfx_window_glutin;
 use gfx_device_gl::{ CommandBuffer, Device, Factory, Resources };
 
+use {Rect, Scalar};
+use color;
+use image;
 use render;
+use std;
 use text;
 use text::rt;
+
+/// Draw text from the text cache texture `tex` in the fragment shader.
+pub const MODE_TEXT: u32 = 0;
+/// Draw an image from the texture at `tex` in the fragment shader.
+pub const MODE_IMAGE: u32 = 1;
+/// Ignore `tex` and draw simple, colored 2D geometry.
+pub const MODE_GEOMETRY: u32 = 2;
 
 const FRAGMENT_SHADER: &'static [u8] = b"
 	#version 140
@@ -20,12 +31,21 @@ const FRAGMENT_SHADER: &'static [u8] = b"
 
 	in vec2 v_Uv;
 	in vec4 v_Color;
+	flat in uint v_Mode;
 
 	out vec4 f_Color;
 
 	void main() {
-		vec4 tex = texture(t_Color, v_Uv);
-		f_Color = v_Color * tex;
+        if (v_Mode == uint(0)) {
+			// Text
+    		f_Color = v_Color * vec4(1.0, 1.0, 1.0, texture(t_Color, v_Uv).a);
+        } else if (v_Mode == uint(1)) {
+			// Image
+            f_Color = texture(t_Color, v_Uv);
+        } else if (v_Mode == uint(2)) {
+			// 2D Geometry
+            f_Color = v_Color;
+        }
 	}
 ";
 
@@ -35,13 +55,16 @@ const VERTEX_SHADER: &'static [u8] = b"
 	in vec2 a_Pos;
 	in vec2 a_Uv;
 	in vec4 a_Color;
+	in uint a_Mode;
 
 	out vec2 v_Uv;
 	out vec4 v_Color;
+	flat out uint v_Mode;
 
 	void main() {
 		v_Uv = a_Uv;
 		v_Color = a_Color;
+		v_Mode = a_Mode;
 		gl_Position = vec4(a_Pos, 0.0, 1.0);
 	}
 ";
@@ -59,6 +82,7 @@ mod gfx_impl {
 	// Vertex and pipeline declarations
 	gfx_defines! {
 		vertex Vertex {
+			mode: u32 = "a_Mode",
 			pos: [f32; 2] = "a_Pos",
 			uv: [f32; 2] = "a_Uv",
 			color: [f32; 4] = "a_Color",
@@ -75,11 +99,12 @@ use self::gfx_impl::{ pipe, Vertex };
 
 // Convenience constructor
 impl Vertex {
-	fn new(pos: [f32; 2], uv: [f32; 2], color: [f32; 4]) -> Vertex {
+	fn new(pos: [f32; 2], uv: [f32; 2], color: [f32; 4], mode: u32) -> Vertex {
 		Vertex {
 			pos: pos,
 			uv: uv,
 			color: color,
+			mode: mode,
 		}
 	}
 }
@@ -235,13 +260,43 @@ impl Renderer {
 		};
 		let dpi_factor = window.hidpi_factor();
 		let (screen_width, screen_height) = (win_w as f32 * dpi_factor, win_h as f32 * dpi_factor);
+		
+		let half_win_w = win_w as Scalar / 2.0;
+        let half_win_h = win_h as Scalar / 2.0;
+
+		// Functions for converting for conrod scalar coords to GL vertex coords (-1.0 to 1.0).
+        let vx = |x: Scalar| (x * dpi_factor as Scalar / half_win_w) as f32;
+        let vy = |y: Scalar| (y * dpi_factor as Scalar / half_win_h) as f32;
 
         vertices.clear();
 
 		// Create vertices
 		while let Some(render::Primitive { id, kind, scizzor, rect }) = primitives.next_primitive() {
 			match kind {
-				render::PrimitiveKind::Rectangle { .. } => {
+				render::PrimitiveKind::Rectangle { color } => {
+					let color = color.to_fsa();
+					let (l, r, b, t) = rect.l_r_b_t();
+
+					let v = |x, y| {
+                        Vertex {
+                            pos: [vx(x), vy(y)],
+                            uv: [0.0, 0.0],
+                            color: color,
+                            mode: MODE_GEOMETRY,
+                        }
+                    };
+
+					let mut push_v = |x, y| vertices.push(v(x, y));
+
+                    // Bottom left triangle.
+                    push_v(l, t);
+                    push_v(r, b);
+                    push_v(l, b);
+
+                    // Top right triangle.
+                    push_v(l, t);
+                    push_v(r, b);
+                    push_v(r, t);
 				},
 				render::PrimitiveKind::Polygon { .. } => {
 				},
@@ -289,7 +344,7 @@ impl Renderer {
 							use std::iter::once;
 
 							let gl_rect = to_gl_rect(screen_rect);
-							let v = |pos, uv| once(Vertex::new(pos, uv, color));
+							let v = |pos, uv| once(Vertex::new(pos, uv, color, MODE_TEXT));
 
 							v([gl_rect.min.x, gl_rect.max.y], [uv_rect.min.x, uv_rect.max.y])
 								.chain(v([gl_rect.min.x, gl_rect.min.y], [uv_rect.min.x, uv_rect.min.y]))
