@@ -16,6 +16,12 @@ extern crate rusttype;
 
 #[cfg(feature="glium")] #[macro_use] pub extern crate glium;
 
+#[cfg(feature="gfx-rs")] extern crate glutin;
+#[cfg(feature="gfx-rs")] #[macro_use] extern crate gfx;
+#[cfg(feature="gfx-rs")] extern crate gfx_core;
+#[cfg(feature="gfx-rs")] extern crate gfx_window_glutin;
+#[cfg(feature="gfx-rs")] extern crate gfx_device_gl;
+
 pub use color::{Color, Colorable};
 pub use border::{Bordering, Borderable};
 pub use label::{FontSize, Labelable};
