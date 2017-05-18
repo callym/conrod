@@ -298,7 +298,40 @@ impl Renderer {
                     push_v(r, b);
                     push_v(r, t);
 				},
-				render::PrimitiveKind::Polygon { .. } => {
+				render::PrimitiveKind::Polygon { color, points } => {
+					// If we don't at least have a triangle, keep looping.
+                    if points.len() < 3 {
+                        continue;
+                    }
+
+					let color = color.to_fsa();
+
+                    let v = |p: [Scalar; 2]| {
+                        Vertex {
+                            pos: [vx(p[0]), vy(p[1])],
+                            uv: [0.0, 0.0],
+                            color: color,
+                            mode: MODE_GEOMETRY,
+                        }
+                    };
+
+					// Triangulate the polygon.
+                    //
+                    // Make triangles between the first point and every following pair of
+                    // points.
+                    //
+                    // For example, for a polygon with 6 points (a to f), this makes the
+                    // following triangles: abc, acd, ade, aef.
+                    let first = points[0];
+                    let first_v = v(first);
+                    let mut prev_v = v(points[1]);
+                    for &p in &points[2..] {
+                        let v = v(p);
+                        vertices.push(first_v);
+                        vertices.push(prev_v);
+                        vertices.push(v);
+                        prev_v = v;
+                    }
 				},
 				render::PrimitiveKind::Lines { .. } => {
 				},
