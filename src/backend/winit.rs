@@ -6,6 +6,7 @@ use Scalar;
 use event::Input;
 use input;
 #[cfg(feature = "glium")] use glium;
+#[cfg(feature = "gfx-rs")] use super::gfx;
 
 
 /// Types that have access to a `winit::Window` and can provide the necessary dimensions and hidpi
@@ -49,6 +50,16 @@ impl WinitWindow for glium::Display {
             Some(window) => window.hidpi_factor(),
             None => 1.0,
         }
+    }
+}
+
+#[cfg(feature = "gfx-rs")]
+impl WinitWindow for gfx::glutin::Window {
+    fn get_inner_size(&self) -> Option<(u32, u32)> {
+        gfx::glutin::Window::as_winit_window(self).get_inner_size()
+    }
+    fn hidpi_factor(&self) -> f32 {
+        gfx::glutin::Window::as_winit_window(self).hidpi_factor()
     }
 }
 
