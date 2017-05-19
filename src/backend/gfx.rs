@@ -2,12 +2,13 @@
 
 pub use gfx;
 pub use glutin;
+pub use gfx_device_gl::{ Factory, Resources };
 
 use gfx::{ texture };
 use gfx::traits::FactoryExt;
 use gfx_core;
 use gfx_window_glutin;
-use gfx_device_gl::{ CommandBuffer, Device, Factory, Resources };
+use gfx_device_gl::{ CommandBuffer, Device };
 
 use {Rect, Scalar};
 use color;
@@ -68,6 +69,25 @@ const VERTEX_SHADER: &'static [u8] = b"
 		gl_Position = vec4(a_Pos, 0.0, 1.0);
 	}
 ";
+
+/// Gfx textures that have two dimensions.
+pub trait TextureDimensions {
+    /// The width and height of the texture.
+    fn dimensions(&self) -> (u32, u32);
+}
+
+impl<T> TextureDimensions for T
+    where T: std::ops::Deref<Target=
+	(
+		gfx::handle::Texture<Resources, gfx::format::R8_G8_B8_A8>,
+		gfx::handle::ShaderResourceView<Resources, [f32; 4]>
+	)>
+{
+    fn dimensions(&self) -> (u32, u32) {
+		let d = self.0.get_info().kind.get_dimensions();
+		(d.0 as u32, d.1 as u32)
+    }
+}
 
 // Format definitions (must be pub for  gfx_defines to use them)
 pub type ColorFormat = gfx::format::Srgba8;
@@ -241,8 +261,8 @@ impl Renderer {
 		})
 	}
 
-	pub fn fill<P>(&mut self, mut primitives: P) -> Result<(), FillError> 
-		where P: render::PrimitiveWalker
+	pub fn fill<P, T>(&mut self, mut primitives: P, image_map: &image::Map<T>) -> Result<(), FillError> 
+		where P: render::PrimitiveWalker, T: TextureDimensions
 	{
 		let Renderer { 
 			ref mut encoder, 
@@ -386,7 +406,53 @@ impl Renderer {
                         a = b;
                     }
 				},
-				render::PrimitiveKind::Image { .. } => {
+				render::PrimitiveKind::Image { image_id, color, source_rect } => {
+					// Switch to the `Image` state for this image if we're not in it already.
+                    let new_image_id = image_id;
+
+                    let color = color.unwrap_or(color::WHITE).to_fsa();
+
+                    let (image_w, image_h) = image_map.get(&image_id).unwrap().dimensions();
+                    let (image_w, image_h) = (image_w as Scalar, image_h as Scalar);
+
+                    // Get the sides of the source rectangle as uv coordinates.
+                    //
+                    // Texture coordinates range:
+                    // - left to right: 0.0 to 1.0
+                    // - bottom to top: 0.0 to 1.0
+                    let (uv_l, uv_r, uv_b, uv_t) = match source_rect {
+                        Some(src_rect) => {
+                            let (l, r, b, t) = src_rect.l_r_b_t();
+                            ((l / image_w) as f32,
+                             (r / image_w) as f32,
+                             (b / image_h) as f32,
+                             (t / image_h) as f32)
+                        },
+                        None => (0.0, 1.0, 0.0, 1.0),
+                    };
+
+                    let v = |x, y, t| {
+                        Vertex {
+                            pos: [vx(x), vy(y)],
+                            uv: t,
+                            color: color,
+                            mode: MODE_IMAGE,
+                        }
+                    };
+
+                    let mut push_v = |x, y, t| vertices.push(v(x, y, t));
+
+                    let (l, r, b, t) = rect.l_r_b_t();
+
+                    // Bottom left triangle.
+                    push_v(l, t, [uv_l, uv_t]);
+                    push_v(r, b, [uv_r, uv_b]);
+                    push_v(l, b, [uv_l, uv_b]);
+
+                    // Top right triangle.
+                    push_v(l, t, [uv_l, uv_t]);
+                    push_v(r, b, [uv_r, uv_b]);
+                    push_v(r, t, [uv_r, uv_t]);
 				},
 				render::PrimitiveKind::Text { color, text, font_id } => {
 					let GlyphCache { ref mut cache, ref mut texture, .. } = *glyph_cache;
@@ -484,6 +550,10 @@ impl Renderer {
 
 	pub fn window(&self) -> &glutin::Window {
 		&self.window
+	}
+
+	pub fn factory(&self) -> &Factory {
+		&self.factory
 	}
 }
 

@@ -15,12 +15,13 @@ fn main() {
 
 #[cfg(all(feature="winit", feature="gfx-rs"))]
 mod feature {
-    extern crate gfx_window_glutin;
     extern crate find_folder;
+    extern crate image;
 
     use conrod;
     use conrod::backend::gfx;
     use support;
+    use std;
 
     const WIN_W: u32 = support::WIN_W;
     const WIN_H: u32 = support::WIN_H;
@@ -40,16 +41,30 @@ mod feature {
         let font_path = assets.join("fonts/NotoSans/NotoSans-Regular.ttf");
         ui.fonts.insert_from_file(font_path).unwrap();
 
-        // FIXME: We don't yet load the rust logo, so just insert nothing for now so we can get an
-        // identifier used to construct the DemoApp. This should be changed to *actually* load a
-        // gfx texture for the rust logo and insert it into the map.
+        let mut renderer = conrod::backend::gfx::Renderer::new(builder).unwrap();
+
+        // Load the Rust logo from our assets folder to use as an example image.
+        fn load_rust_logo(factory: &gfx::Factory) -> (
+            gfx::gfx::handle::Texture<gfx::Resources, gfx::gfx::format::R8_G8_B8_A8>,
+            gfx::gfx::handle::ShaderResourceView<gfx::Resources, [f32; 4]>
+        )
+        {
+            use self::gfx::gfx::Factory;
+
+            let assets = find_folder::Search::ParentsThenKids(3, 3).for_folder("assets").unwrap();
+            let path = assets.join("images/rust.png");
+            let rgba_image = image::open(&std::path::Path::new(&path)).unwrap().to_rgba();
+            let (width, height) = rgba_image.dimensions();
+            let kind = gfx::gfx::texture::Kind::D2(width as u16, height as u16, gfx::gfx::texture::AaMode::Single);
+            let texture_view = factory.create_texture_immutable_u8::<gfx::gfx::format::Rgba8>(kind, &[&rgba_image]).unwrap();
+            texture_view
+        }
+
         let mut image_map = conrod::image::Map::new();
-        let rust_logo = image_map.insert(());
+        let rust_logo = image_map.insert(load_rust_logo(renderer.factory()));
 
         // Demonstration app state that we'll control with our conrod GUI.
         let mut app = support::DemoApp::new(rust_logo);
-
-        let mut renderer = conrod::backend::gfx::Renderer::new(builder).unwrap();
 
         // Event loop
         let mut event_loop = support::EventLoop::new();
@@ -78,7 +93,7 @@ mod feature {
 
             // Draw the `Ui`.
             if let Some(primitives) = ui.draw_if_changed() {
-                renderer.fill(primitives);
+                renderer.fill(primitives, &image_map);
 
                 renderer.draw();
             }
