@@ -95,10 +95,30 @@ const VERTEX_SHADER: &'static [u8] = b"
     }
 ";
 
+/// Gfx textures that have two dimensions.
+pub struct Texture<R: Resources> {
+    texture: gfx::handle::Texture<R, SurfaceFormat>,
+    view: gfx::handle::ShaderResourceView<R, [f32; 4]>,
+}
+
+impl<R: Resources> Texture<R> {
+    pub fn new(texture: gfx::handle::Texture<R, SurfaceFormat>, view: gfx::handle::ShaderResourceView<R, [f32; 4]>) -> Self {
+        Self {
+            texture: texture,
+            view: view,
+        }
+    }
+
+    fn dimensions(&self) -> (u32, u32) {
+        let d = self.texture.get_info().kind.get_dimensions();
+		(d.0 as u32, d.1 as u32)
+    }
+}
+
 // Format definitions (must be pub for  gfx_defines to use them)
 pub type ColorFormat = gfx::format::Srgba8;
 pub type DepthFormat = gfx::format::DepthStencil;
-type SurfaceFormat = gfx::format::R8_G8_B8_A8;
+pub type SurfaceFormat = gfx::format::R8_G8_B8_A8;
 type FullFormat = (SurfaceFormat, gfx::format::Unorm);
 
 #[allow(unsafe_code)]
@@ -312,7 +332,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
         }
     }
 
-    pub fn fill<F, P>(&mut self, factory: &mut F, mut primitives: P, (width, height): (u16, u16), dpi_factor: f32) -> Result<(), FillError> 
+    pub fn fill<F, P>(&mut self, factory: &mut F, mut primitives: P, image_map: &image::Map<Texture<R>>, (width, height): (u16, u16), dpi_factor: f32) -> Result<(), FillError> 
         where F: Factory<R, CommandBuffer = C>, P: render::PrimitiveWalker
     {
         self.start_frame(factory);
@@ -525,10 +545,76 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
 
                         a = b;
                     }
-                },
-                render::PrimitiveKind::Image { .. } => {
-                },
-                render::PrimitiveKind::Text { color, text, font_id } => {
+				},
+				render::PrimitiveKind::Image { image_id, color, source_rect } => {
+					// Switch to the `Image` state for this image if we're not in it already.
+                    let new_image_id = image_id;
+                    match current_state {
+                        // If we're already in the drawing mode for this image, we're done.
+                        State::Image { image_id, .. } if image_id == new_image_id => (),
+                        // If we were in the `Plain` drawing state, switch to Image drawing state.
+                        State::Plain { start } => {
+                            commands.push(PreparedCommand::Plain(start..vertices.len()));
+                            current_state = State::Image {
+                                image_id: new_image_id,
+                                start: vertices.len(),
+                            };
+                        },
+                        // If we were drawing a different image, switch state to draw *this* image.
+                        State::Image { image_id, start } => {
+                            commands.push(PreparedCommand::Image(image_id, start..vertices.len()));
+                            current_state = State::Image {
+                                image_id: new_image_id,
+                                start: vertices.len(),
+                            };
+                        },
+                    }
+
+                    let color = color.unwrap_or(color::WHITE).to_fsa();
+
+                    let (image_w, image_h) = image_map.get(&image_id).unwrap().dimensions();
+                    let (image_w, image_h) = (image_w as Scalar, image_h as Scalar);
+
+                    // Get the sides of the source rectangle as uv coordinates.
+                    //
+                    // Texture coordinates range:
+                    // - left to right: 0.0 to 1.0
+                    // - bottom to top: 0.0 to 1.0
+                    let (uv_l, uv_r, uv_b, uv_t) = match source_rect {
+                        Some(src_rect) => {
+                            let (l, r, b, t) = src_rect.l_r_b_t();
+                            ((l / image_w) as f32,
+                             (r / image_w) as f32,
+                             (b / image_h) as f32,
+                             (t / image_h) as f32)
+                        },
+                        None => (0.0, 1.0, 0.0, 1.0),
+                    };
+
+                    let v = |x, y, t| {
+                        Vertex {
+                            pos: [vx(x), vy(y)],
+                            uv: t,
+                            color: color,
+                            mode: MODE_IMAGE,
+                        }
+                    };
+
+                    let mut push_v = |x, y, t| vertices.push(v(x, y, t));
+
+                    let (l, r, b, t) = rect.l_r_b_t();
+
+                    // Bottom left triangle.
+                    push_v(l, t, [uv_l, uv_b]);
+                    push_v(r, b, [uv_r, uv_t]);
+                    push_v(l, b, [uv_l, uv_t]);
+
+                    // Top right triangle.
+                    push_v(l, t, [uv_l, uv_b]);
+                    push_v(r, b, [uv_r, uv_t]);
+                    push_v(r, t, [uv_r, uv_b]);
+				},
+				render::PrimitiveKind::Text { color, text, font_id } => {
                     switch_to_plain_state!();
 
                     let positioned_glyphs = text.positioned_glyphs(dpi_factor);
@@ -599,7 +685,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
         Ok(())
     }
 
-    pub fn draw(&mut self) -> Result<gfx::Encoder<R, C>, DrawError>
+    pub fn draw(&mut self, image_map: &image::Map<Texture<R>>) -> Result<gfx::Encoder<R, C>, DrawError>
     {
         // needs to indent this block so the references are
         // dropped before we try to end the frame
@@ -657,7 +743,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
                         // given `id`.
                         Draw::Image(image_id, slice) => {
                             // Draw the vertices
-                            data.color.0 = view.clone();
+                            data.color.0 = image_map.get(&image_id).unwrap().view.clone();
                             let len = slice.len() as u32;
                             let slice = gfx::Slice {
                                 start: start,
