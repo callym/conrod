@@ -3,11 +3,10 @@
 pub use gfx;
 pub use glutin;
 
-use gfx::{ texture };
+use gfx::{ CommandBuffer, Resources, texture };
 use gfx::traits::FactoryExt;
-use gfx_core;
-use gfx_window_glutin;
-use gfx_device_gl::{ CommandBuffer, Device, Factory, Resources };
+
+use gfx_device_gl;
 
 use { Rect, Scalar };
 use color;
@@ -98,7 +97,7 @@ const VERTEX_SHADER: &'static [u8] = b"
 
 // Format definitions (must be pub for  gfx_defines to use them)
 pub type ColorFormat = gfx::format::Srgba8;
-type DepthFormat = gfx::format::DepthStencil;
+pub type DepthFormat = gfx::format::DepthStencil;
 type SurfaceFormat = gfx::format::R8_G8_B8_A8;
 type FullFormat = (SurfaceFormat, gfx::format::Unorm);
 
@@ -152,7 +151,7 @@ pub enum RendererCreationError {
 #[derive(Copy, Clone, Debug)]
 pub enum FillError {
     /// Errors that might occur interacting with the window.
-    Window,
+    Encoder,
 }
 
 /// Possible errors that may occur during a call to `Renderer::draw`.
@@ -163,33 +162,31 @@ pub enum DrawError {
     /// Errors that might occur when drawing to the `glium::Surface`.
     Draw(),
     ContextError(glutin::ContextError),
+    Encoder,
 }
 
-pub struct GlyphCache {
+pub struct GlyphCache<R: Resources> {
     cache: text::GlyphCache,
-    texture: gfx_core::handle::Texture<Resources, SurfaceFormat>,
-    view: gfx_core::handle::ShaderResourceView<Resources, [f32; 4]>,
+    texture: gfx::handle::Texture<R, SurfaceFormat>,
+    view: gfx::handle::ShaderResourceView<R, [f32; 4]>,
 }
 
-impl GlyphCache {
-    pub fn new<F>(window: &glutin::Window, factory: &mut F) -> Result<Self, RendererCreationError>
-        where F: gfx::Factory<Resources>
+impl<R: Resources> GlyphCache<R> {
+    pub fn new<F>(factory: &mut F, (width, height): (u16, u16), dpi_factor: f32) -> Result<Self, RendererCreationError>
+        where F: Factory<R>
     {
-        let (win_w, win_h) = match window.get_inner_size() {
-            Some(s) => s,
-            None => return Err(RendererCreationError::Window),
-        };
-
-        let dpi = window.hidpi_factor();
-        let width = (win_w as f32 * dpi) as u32;
-        let height = (win_h as f32 * dpi) as u32;
+        let width = (width as f32 * dpi_factor) as u32;
+        let height = (width as f32 * dpi_factor) as u32;
 
         const SCALE_TOLERANCE: f32 = 0.1;
         const POSITION_TOLERANCE: f32 = 0.1;
 
-        let cache = text::GlyphCache::new(width, height,
+        let cache = text::GlyphCache::new(
+            width,
+            height,
             SCALE_TOLERANCE,
-            POSITION_TOLERANCE);
+            POSITION_TOLERANCE
+        );
 
         let data = vec![0; (width * height * 4) as usize];
 
@@ -200,10 +197,6 @@ impl GlyphCache {
             texture: texture,
             view: view,
         })
-    }
-
-    pub fn texture(&self) -> &gfx_core::handle::Texture<Resources, SurfaceFormat> {
-        &self.texture
     }
 }
 
@@ -229,95 +222,89 @@ impl<'a> Iterator for Commands<'a> {
 
 /// A type used for translating `render::Primitives` into `Command`s that indicate how to draw the
 /// conrod GUI using `gfx-rs`.
-pub struct Renderer {
-    glyph_cache: GlyphCache,
+pub struct Renderer<R: Resources, C: CommandBuffer<R>> {
+    glyph_cache: GlyphCache<R>,
     commands: Vec<PreparedCommand>,
     vertices: Vec<Vertex>,
-    // I think we need these?
-    data: pipe::Data<Resources>,
-    pso: gfx::PipelineState<Resources, pipe::Meta>,
-    // ideally we wouldn't own these
-    window: glutin::Window,
-    encoder: gfx::Encoder<Resources, CommandBuffer>,
-    device: Device,
-    factory: Factory,
-    main_color: gfx_core::handle::RenderTargetView<Resources, (gfx_core::format::R8_G8_B8_A8, gfx_core::format::Srgb)>,
+    vertex_buffer: gfx::handle::Buffer<R, Vertex>,
+    data: pipe::Data<R>,
+    pso: gfx::PipelineState<R, pipe::Meta>,
+    encoder: Option<gfx::Encoder<R, C>>,
 }
 
-impl Renderer {
-    pub fn new(builder: glutin::WindowBuilder) -> Result<Self, RendererCreationError> {
-        // Initialize gfx things
-        let (window, mut device, mut factory, main_color, _) =
-            gfx_window_glutin::init::<ColorFormat, DepthFormat>(builder);
-        let mut encoder: gfx::Encoder<_, _> = factory.create_command_buffer().into();
-
-        let (win_w, win_h) = match window.get_inner_size() {
-            Some(s) => s,
-            None => return Err(RendererCreationError::Window),
-        };
-
+impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
+    pub fn new<F>(factory: &mut F, main_color: &gfx::handle::RenderTargetView<R, (gfx::format::R8_G8_B8_A8, gfx::format::Srgb)>, (width, height): (u16, u16), dpi_factor: f32)
+        -> Result<Self, RendererCreationError>
+        where F: Factory<R, CommandBuffer = C>
+    {
         // Create texture sampler
         let sampler_info = texture::SamplerInfo::new(
             texture::FilterMethod::Bilinear,
             texture::WrapMode::Clamp
         );
-        let sampler = {
-            use gfx::Factory;
-            factory.create_sampler(sampler_info)
-        };
+        let sampler = factory.create_sampler(sampler_info);
 
         // Dummy values for initialization
         let vbuf = factory.create_vertex_buffer(&[]);
-        let (_, fake_texture) = create_texture(&mut factory, 2, 2, &[0; 4]);
+        let (_, fake_texture) = create_texture(factory, 2, 2, &[0; 4]);
 
         let mut data = pipe::Data {
-            vbuf: vbuf,
+            vbuf: vbuf.clone(),
             color: (fake_texture.clone(), sampler),
             out: main_color.clone(),
             scissor: gfx::Rect {
                 x: 0,
                 y: 0,
-                w: win_w as u16,
-                h: win_h as u16,
+                w: width,
+                h: height,
             },
         };
 
         // Compile GL program
         let pso = factory.create_pipeline_simple(VERTEX_SHADER, FRAGMENT_SHADER, pipe::new())?;
 
-        let glyph_cache = GlyphCache::new(&window, &mut factory)?;
+        let glyph_cache = GlyphCache::new(factory, (width, height), dpi_factor)?;
 
         Ok(Self {
             glyph_cache: glyph_cache,
             commands: Vec::new(),
             vertices: Vec::new(),
+            vertex_buffer: vbuf.clone(),
             
             data: data,
             pso: pso,
-            encoder: encoder,
-
-            window: window,
-            device: device,
-            factory: factory,
-            main_color: main_color,
+            encoder: None,
         })
     }
 
-    pub fn fill<P>(&mut self, mut primitives: P) -> Result<(), FillError> 
-        where P: render::PrimitiveWalker
+    pub fn start_frame<F>(&mut self, factory: &mut F) where F: Factory<R, CommandBuffer = C> {
+        self.encoder = Some(factory.create_encoder());
+    }
+
+    pub fn end_frame(&mut self) -> gfx::Encoder<R, C> {
+        self.encoder.take().unwrap()
+    }
+
+    pub fn update_buffer<F>(&mut self, factory: &mut F) where F: Factory<R, CommandBuffer = C> {
+        let Renderer { ref vertices, ref mut vertex_buffer, .. } = *self;
+        
+        if vertex_buffer.len() < vertices.len() {
+            *vertex_buffer = factory.create_buffer(
+                vertices.len(),
+                gfx::buffer::Role::Vertex,
+                gfx::memory::Usage::Dynamic,
+                gfx::Bind::empty()
+            ).unwrap();
+        }
+    }
+
+    pub fn fill<F, P>(&mut self, factory: &mut F, mut primitives: P, (width, height): (u16, u16), dpi_factor: f32) -> Result<(), FillError> 
+        where F: Factory<R, CommandBuffer = C>, P: render::PrimitiveWalker
     {
-        let Renderer { 
-            ref mut commands,
-            ref mut vertices, 
-            ref mut glyph_cache,
+        self.start_frame(factory);
 
-            ref mut encoder,
-            ref mut window,
-            ..
-        } = *self;
-
-        commands.clear();
-        vertices.clear();
+        self.commands.clear();
+        self.vertices.clear();
 
         enum State {
             Image { image_id: image::Id, start: usize },
@@ -325,31 +312,11 @@ impl Renderer {
         }
 
         let mut current_state = State::Plain { start: 0 };
-
-        // Switches to the `Plain` state and completes the previous `Command` if not already in the
-        // `Plain` state.
-        macro_rules! switch_to_plain_state {
-            () => {
-                match current_state {
-                    State::Plain { .. } => (),
-                    State::Image { image_id, start } => {
-                        commands.push(PreparedCommand::Image(image_id, start..vertices.len()));
-                        current_state = State::Plain { start: vertices.len() };
-                    },
-                }
-            };
-        }
-
-        // Framebuffer dimensions and the "dots per inch" factor.
-        let (win_w, win_h) = match window.get_inner_size() {
-            Some(s) => s,
-            None => return Err(FillError::Window),
-        };
-        let dpi_factor = window.hidpi_factor();
-        let (screen_width, screen_height) = (win_w as f32 * dpi_factor, win_h as f32 * dpi_factor);
         
-        let half_win_w = win_w as f32 / 2.0;
-        let half_win_h = win_h as f32 / 2.0;
+        let (screen_width, screen_height) = (width as f32 * dpi_factor, height as f32 * dpi_factor);
+        
+        let half_win_w = width as f32 / 2.0;
+        let half_win_h = height as f32 / 2.0;
 
         // Functions for converting for conrod scalar coords to GL vertex coords (-1.0 to 1.0).
         let vx = |x: Scalar| (x as f32 * dpi_factor / half_win_w) as f32;
@@ -384,6 +351,26 @@ impl Renderer {
 
         // Create vertices
         while let Some(primitive) = primitives.next_primitive() {
+            let Renderer { ref mut commands, ref mut encoder, ref mut vertices, .. } = *self;
+            let encoder = match *encoder {
+                Some(ref mut encoder) => encoder,
+                None => return Err(FillError::Encoder)
+            };
+
+            // Switches to the `Plain` state and completes the previous `Command` if not already in the
+            // `Plain` state.
+            macro_rules! switch_to_plain_state {
+                () => {
+                    match current_state {
+                        State::Plain { start } => (),
+                        State::Image { image_id, start } => {
+                            commands.push(PreparedCommand::Image(image_id, start..vertices.len()));
+                            current_state = State::Plain { start: vertices.len() };
+                        },
+                    }
+                };
+            }
+
             let render::Primitive { kind, scizzor, rect, .. } = primitive;
 
             // Check for a `Scizzor` command.
@@ -532,7 +519,7 @@ impl Renderer {
 
                     let positioned_glyphs = text.positioned_glyphs(dpi_factor);
 
-                    let GlyphCache { ref mut cache, ref mut texture, .. } = *glyph_cache;
+                    let GlyphCache { ref mut cache, ref mut texture, .. } = self.glyph_cache;
 
                     // Queue the glyphs to be cached
                     for glyph in positioned_glyphs {
@@ -588,82 +575,93 @@ impl Renderer {
         // Enter the final command.
         match current_state {
             State::Plain { start } =>
-                commands.push(PreparedCommand::Plain(start..vertices.len())),
+                self.commands.push(PreparedCommand::Plain(start..self.vertices.len())),
             State::Image { image_id, start } =>
-                commands.push(PreparedCommand::Image(image_id, start..vertices.len())),
+                self.commands.push(PreparedCommand::Image(image_id, start..self.vertices.len())),
         }
+
+        self.update_buffer(factory);
 
         Ok(())
     }
 
-    pub fn draw(&mut self) -> Result<(), DrawError> {
-        use gfx_core::Device;
+    pub fn draw(&mut self) -> Result<gfx::Encoder<R, C>, DrawError>
+    {
+        // needs to indent this block so the references are
+        // dropped before we try to end the frame
+        {
+            let Renderer { 
+                ref glyph_cache,
+                ref commands,
+                ref vertices,
+                ref mut data,
+                ref pso,
+                ref mut encoder,
+                ref mut vertex_buffer,
+                ..
+            } = *self;
 
-        let Renderer { 
-            ref glyph_cache,
-            ref commands,
-            ref vertices,
+            let encoder = match *encoder {
+                Some(ref mut encoder) => encoder,
+                None => return Err(DrawError::Encoder)
+            };
 
-            ref mut data,
-            ref pso,
+            let GlyphCache { ref view, .. } = *glyph_cache;
 
-            ref mut encoder,
-            ref mut window,
-            ref mut device,
-            ref mut factory,
-            ref main_color,
-            ..
-        } = *self;
+            let commands = Commands {
+                commands: commands.iter(),
+                vertices: vertices,
+            };
 
-        let GlyphCache { ref view, .. } = *glyph_cache;
+            encoder.update_buffer(vertex_buffer, vertices, 0).unwrap();
+            data.vbuf = vertex_buffer.clone();
 
-        // Clear the window
-        encoder.clear(&main_color, [0.2, 0.2, 0.2, 1.0]);
+            let mut start = 0;
+            for command in commands {
+                match command {
+                    // Update the `scizzor` before continuing to draw.
+                    Command::Scizzor(scizzor) => data.scissor = scizzor,
+                    // Draw to the target with the given `draw` command.
+                    Command::Draw(draw) => match draw {
+                        // Draw text and plain 2D geometry.
+                        Draw::Plain(slice) => {
+                            // Draw the vertices
+                            data.color.0 = view.clone();
+                            let len = slice.len() as u32;
+                            let slice = gfx::Slice {
+                                start: start,
+                                end: start + len,
+                                base_vertex: 0,
+                                instances: None,
+                                buffer: gfx::IndexBuffer::Auto,
+                            };
+                            start += len;
+                            encoder.draw(&slice, pso, data);
+                        },
 
-        let commands = Commands {
-            commands: commands.iter(),
-            vertices: vertices,
-        };
+                        // Draw an image whose texture data lies within the `image_map` at the
+                        // given `id`.
+                        Draw::Image(image_id, slice) => {
+                            // Draw the vertices
+                            data.color.0 = view.clone();
+                            let len = slice.len() as u32;
+                            let slice = gfx::Slice {
+                                start: start,
+                                end: start + len,
+                                base_vertex: 0,
+                                instances: None,
+                                buffer: gfx::IndexBuffer::Auto,
+                            };
+                            start += len;
+                            encoder.draw(&slice, pso, data);
+                        },
 
-        for command in commands {
-            match command {
-                // Update the `scizzor` before continuing to draw.
-                Command::Scizzor(scizzor) => data.scissor = scizzor,
-                // Draw to the target with the given `draw` command.
-                Command::Draw(draw) => match draw {
-                    // Draw text and plain 2D geometry.
-                    Draw::Plain(slice) => {
-                        // Draw the vertices
-                        data.color.0 = view.clone();
-                        let (vbuf, slice) = factory.create_vertex_buffer_with_slice(slice, ());
-                        data.vbuf = vbuf;
-                        encoder.draw(&slice, pso, data);
-                    },
-
-                    // Draw an image whose texture data lies within the `image_map` at the
-                    // given `id`.
-                    Draw::Image(image_id, slice) => {
-                        // Draw the vertices
-                        data.color.0 = view.clone();
-                        let (vbuf, slice) = factory.create_vertex_buffer_with_slice(slice, ());
-                        data.vbuf = vbuf;
-                        encoder.draw(&slice, pso, data);
-                    },
-
+                    }
                 }
             }
         }
 
-        // Display the results
-        encoder.flush(device);
-        window.swap_buffers()?;
-        device.cleanup();
-
-        Ok(())
-    }
-
-    pub fn window(&self) -> &glutin::Window {
-        &self.window
+        Ok(self.end_frame())
     }
 }
 
@@ -750,5 +748,17 @@ impl From<gfx::PipelineStateError<String>> for RendererCreationError {
 impl From<glutin::ContextError> for DrawError {
     fn from(err: glutin::ContextError) -> Self {
         DrawError::ContextError(err)
+    }
+}
+
+pub trait Factory<R: Resources> : gfx::Factory<R> {
+    type CommandBuffer: CommandBuffer<R>;
+    fn create_encoder(&mut self) -> gfx::Encoder<R, Self::CommandBuffer>;
+}
+
+impl Factory<gfx_device_gl::Resources> for gfx_device_gl::Factory {
+    type CommandBuffer = gfx_device_gl::CommandBuffer;
+    fn create_encoder(&mut self) -> gfx::Encoder<gfx_device_gl::Resources, Self::CommandBuffer> {
+        self.create_command_buffer().into()
     }
 }

@@ -22,14 +22,18 @@ mod feature {
     use conrod::backend::gfx;
     use support;
 
-    const WIN_W: u32 = support::WIN_W;
-    const WIN_H: u32 = support::WIN_H;
+    const WIN_W: u16 = support::WIN_W as u16;
+    const WIN_H: u16 = support::WIN_H as u16;
 
     pub fn main() {
         // Builder for window
         let builder = gfx::glutin::WindowBuilder::new()
+            .with_dimensions(WIN_W as u32, WIN_H as u32);
             .with_title("Conrod with GFX and Glutin")
-            .with_dimensions(WIN_W, WIN_H);
+        // Initialize gfx things
+        let (window, mut device, mut factory, main_color, _) =
+            gfx_window_glutin::init::<gfx::ColorFormat, gfx::DepthFormat>(builder);
+        let mut encoder: gfx::gfx::Encoder<_, _> = factory.create_command_buffer().into();
 
         // Create Ui and Ids of widgets to instantiate
         let mut ui = conrod::UiBuilder::new([WIN_W as f64, WIN_H as f64]).theme(support::theme()).build();
@@ -49,17 +53,22 @@ mod feature {
         // Demonstration app state that we'll control with our conrod GUI.
         let mut app = support::DemoApp::new(rust_logo);
 
-        let mut renderer = conrod::backend::gfx::Renderer::new(builder).unwrap();
+        let mut renderer = conrod::backend::gfx::Renderer::new(
+            &mut factory,
+            &main_color,
+            (WIN_W, WIN_H),
+            window.hidpi_factor()
+        ).unwrap();
 
         // Event loop
         let mut event_loop = support::EventLoop::new();
         'main: loop {
             
             // Handle all events.
-            for event in event_loop.next(renderer.window()) {
+            for event in event_loop.next(&window) {
 
                 // Use the `winit` backend feature to convert the winit event to a conrod one.
-                if let Some(event) = conrod::backend::winit::convert(event.clone(), renderer.window()) {
+                if let Some(event) = conrod::backend::winit::convert(event.clone(), &window) {
                     ui.handle_event(event);
                     event_loop.needs_update();
                 }
@@ -78,9 +87,19 @@ mod feature {
 
             // Draw the `Ui`.
             if let Some(primitives) = ui.draw_if_changed() {
-                renderer.fill(primitives);
+                use self::gfx::gfx::Device;
 
-                renderer.draw();
+                // Clear the window
+                encoder.clear(&main_color, [0.2, 0.2, 0.2, 1.0]);
+                encoder.flush(&mut device);
+
+                renderer.fill(&mut factory, primitives, (WIN_W, WIN_H), window.hidpi_factor());
+
+                let mut encoder = renderer.draw().unwrap();
+                encoder.flush(&mut device);
+
+                window.swap_buffers().unwrap();
+                device.cleanup();
             }
         }
     }
