@@ -28,8 +28,10 @@ mod feature {
     pub fn main() {
         // Builder for window
         let builder = gfx::glutin::WindowBuilder::new()
-            .with_dimensions(WIN_W as u32, WIN_H as u32);
+            .with_vsync()
+            .with_dimensions(WIN_W as u32, WIN_H as u32)
             .with_title("Conrod with GFX and Glutin")
+            .with_multisampling(8);
         // Initialize gfx things
         let (window, mut device, mut factory, main_color, _) =
             gfx_window_glutin::init::<gfx::ColorFormat, gfx::DepthFormat>(builder);

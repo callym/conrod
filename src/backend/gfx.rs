@@ -261,7 +261,21 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
         };
 
         // Compile GL program
-        let pso = factory.create_pipeline_simple(VERTEX_SHADER, FRAGMENT_SHADER, pipe::new())?;
+        let pso = {
+            let set = factory.create_shader_set(
+                VERTEX_SHADER,
+                FRAGMENT_SHADER
+            ).unwrap();
+            factory.create_pipeline_state(
+                &set,
+                gfx::Primitive::TriangleList,
+                gfx::state::Rasterizer {
+                    samples: Some(gfx::state::MultiSample {}),
+                    .. gfx::state::Rasterizer::new_fill()
+                },
+                pipe::new()
+            )?
+        };
 
         let glyph_cache = GlyphCache::new(factory, (width, height), dpi_factor)?;
 
