@@ -115,6 +115,22 @@ impl<R: Resources> Texture<R> {
     }
 }
 
+/// Converts gamma (brightness) from sRGB to linear color space.
+///
+/// sRGB is the default color space for image editors, pictures, internet etc.
+/// Linear gamma yields better results when doing math with colors.
+pub fn gamma_srgb_to_linear(c: [f32; 4]) -> [f32; 4] {
+    fn component(f: f32) -> f32 {
+        // Taken from https://github.com/PistonDevelopers/graphics/src/color.rs#L42
+        if f <= 0.04045 {
+            f / 12.92
+        } else {
+            ((f + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    [component(c[0]), component(c[1]), component(c[2]), c[3]]
+}
+
 // Format definitions (must be pub for  gfx_defines to use them)
 pub type ColorFormat = gfx::format::Srgba8;
 pub type DepthFormat = gfx::format::DepthStencil;
@@ -430,7 +446,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
                 render::PrimitiveKind::Rectangle { color } => {
                     switch_to_plain_state!();
 
-                    let color = color.to_fsa();
+                    let color = gamma_srgb_to_linear(color.to_fsa());
                     let (l, r, b, t) = rect.l_r_b_t();
 
                     let v = |x, y| {
@@ -462,7 +478,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
 
                     switch_to_plain_state!();
 
-                    let color = color.to_fsa();
+                    let color = gamma_srgb_to_linear(color.to_fsa());
 
                     let v = |p: [Scalar; 2]| {
                         Vertex {
@@ -499,7 +515,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
 
                     switch_to_plain_state!();
 
-                    let color = color.to_fsa();
+                    let color = gamma_srgb_to_linear(color.to_fsa());
 
                     let v = |p: [Scalar; 2]| {
                         Vertex {
@@ -635,7 +651,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
                         update_texture(encoder, texture, offset, size, &new_data);
                     }).unwrap();
 
-                    let color = color.to_fsa();
+                    let color = gamma_srgb_to_linear(color.to_fsa());
                     let cache_id = font_id.index();
                     let origin = rt::point(0.0, 0.0);
 
