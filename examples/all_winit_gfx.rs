@@ -56,10 +56,7 @@ mod feature {
         ).unwrap(); 
 
         // Load the Rust logo from our assets folder to use as an example image.
-        fn load_rust_logo<R, C, F>(factory: &mut F) -> (
-            gfx::gfx::handle::Texture<R, gfx::SurfaceFormat>,
-            gfx::gfx::handle::ShaderResourceView<R, [f32; 4]>
-        )
+        fn load_rust_logo<R, C, F>(factory: &mut F) -> gfx::Texture<R>
             where R: gfx::gfx::Resources, C: gfx::gfx::CommandBuffer<R>, F: gfx::Factory<R, CommandBuffer = C>
         {
             use self::gfx::gfx::Factory;
@@ -70,7 +67,8 @@ mod feature {
             let (width, height) = rgba_image.dimensions();
             let kind = gfx::gfx::texture::Kind::D2(width as u16, height as u16, gfx::gfx::texture::AaMode::Single);
             let texture_view = factory.create_texture_immutable_u8::<gfx::ColorFormat>(kind, &[&rgba_image]).unwrap();
-            texture_view
+
+            gfx::Texture::new(texture_view.0, texture_view.1)
         }
 
         let mut image_map = conrod::image::Map::new();
@@ -121,7 +119,7 @@ mod feature {
 
                 renderer.fill(&mut factory, primitives, &image_map, (WIN_W, WIN_H), window.hidpi_factor());
 
-                let mut encoder = renderer.draw().unwrap();
+                let mut encoder = renderer.draw(&image_map).unwrap();
                 encoder.flush(&mut device);
 
                 window.swap_buffers().unwrap();
