@@ -131,9 +131,11 @@ pub fn gamma_srgb_to_linear(c: [f32; 4]) -> [f32; 4] {
     [component(c[0]), component(c[1]), component(c[2]), c[3]]
 }
 
-// Format definitions (must be pub for  gfx_defines to use them)
+/// The format used for the Gfx color buffer
 pub type ColorFormat = gfx::format::Srgba8;
+/// The format used for the Gfx depth buffer
 pub type DepthFormat = gfx::format::DepthStencil;
+/// The format used for Gfx textures and surfaces
 pub type SurfaceFormat = gfx::format::R8_G8_B8_A8;
 type FullFormat = (SurfaceFormat, gfx::format::Unorm);
 
@@ -269,6 +271,7 @@ pub struct Renderer<R: Resources, C: CommandBuffer<R>> {
 }
 
 impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
+    /// Construct a new empty `Renderer`
     pub fn new<F>(factory: &mut F, main_color: &gfx::handle::RenderTargetView<R, (gfx::format::R8_G8_B8_A8, gfx::format::Srgb)>, (width, height): (u16, u16), dpi_factor: f32)
         -> Result<Self, RendererCreationError>
         where F: Factory<R, CommandBuffer = C>
@@ -327,14 +330,20 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
         })
     }
 
-    pub fn start_frame<F>(&mut self, factory: &mut F) where F: Factory<R, CommandBuffer = C> {
-        self.encoder = Some(factory.create_encoder());
+    /// You have to pass in a new Gfx::Encoder every time
+    /// you want to draw, because at the end of the draw,
+    /// we take the encoder out of the Renderer object to be used
+    pub fn add_encoder(&mut self, encoder: gfx::Encoder<R, C>) {
+        self.encoder = Some(encoder);
     }
 
-    pub fn end_frame(&mut self) -> gfx::Encoder<R, C> {
-        self.encoder.take().unwrap()
-    }
-
+    /// This function is checks if the current vertex buffer is big enough to 
+    /// contain all the produced by the fill, and if it isn't big enough,
+    /// it creates a new buffer that is big enough.
+    /// 
+    /// This means that the `draw` and `fill` function doesn't rely on a Gfx::Factory, which
+    /// should mean that it's possible to thread them, as long as this is called
+    /// in between the calls
     pub fn update_buffer<F>(&mut self, factory: &mut F) where F: Factory<R, CommandBuffer = C> {
         let Renderer { ref vertices, ref mut vertex_buffer, .. } = *self;
         
@@ -348,11 +357,11 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
         }
     }
 
-    pub fn fill<F, P>(&mut self, factory: &mut F, mut primitives: P, image_map: &image::Map<Texture<R>>, (width, height): (u16, u16), dpi_factor: f32) -> Result<(), FillError> 
-        where F: Factory<R, CommandBuffer = C>, P: render::PrimitiveWalker
+    /// Fill the inner vertex and command buffers by translating the given `primitives`.
+    /// Because you don't need to pass in a factory, this can (in theory) be threaded.
+    pub fn fill<P>(&mut self, mut primitives: P, image_map: &image::Map<Texture<R>>, (width, height): (u16, u16), dpi_factor: f32) -> Result<(), FillError> 
+        where P: render::PrimitiveWalker
     {
-        self.start_frame(factory);
-
         self.commands.clear();
         self.vertices.clear();
 
@@ -412,7 +421,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
             macro_rules! switch_to_plain_state {
                 () => {
                     match current_state {
-                        State::Plain { start } => (),
+                        State::Plain { .. } => (),
                         State::Image { image_id, start } => {
                             commands.push(PreparedCommand::Image(image_id, start..vertices.len()));
                             current_state = State::Plain { start: vertices.len() };
@@ -507,7 +516,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
                         prev_v = v;
                     }
                 },
-                render::PrimitiveKind::Lines { color, cap, thickness, points } => {
+                render::PrimitiveKind::Lines { color, thickness, points, .. } => {
                     // We need at least two points to draw any lines.
                     if points.len() < 2 {
                         continue;
@@ -696,11 +705,14 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
                 self.commands.push(PreparedCommand::Image(image_id, start..self.vertices.len())),
         }
 
-        self.update_buffer(factory);
-
         Ok(())
     }
 
+    /// Fills a Gfx::Encoder with commands to be drawn onto a display
+    ///
+    /// Note: This does not draw the commands because (in theory), you could
+    /// call this method from another thread and then draw to the display in
+    /// your main thread using the produced Encoder.
     pub fn draw(&mut self, image_map: &image::Map<Texture<R>>) -> Result<gfx::Encoder<R, C>, DrawError>
     {
         // needs to indent this block so the references are
@@ -777,7 +789,7 @@ impl<R: Resources, C: CommandBuffer<R>> Renderer<R, C> {
             }
         }
 
-        Ok(self.end_frame())
+        Ok(self.encoder.take().unwrap())
     }
 }
 
@@ -867,7 +879,11 @@ impl From<glutin::ContextError> for DrawError {
     }
 }
 
+/// This trait is used as a cross-platform way
+/// to create encoders for use in the renderer
 pub trait Factory<R: Resources> : gfx::Factory<R> {
+    /// The type of the CommandBuffer produced by this Gfx factory
+    /// This is different for every Gfx backend (OGL, DX, Vulkan, ..)
     type CommandBuffer: CommandBuffer<R>;
     fn create_encoder(&mut self) -> gfx::Encoder<R, Self::CommandBuffer>;
 }

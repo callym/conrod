@@ -48,7 +48,7 @@ mod feature {
         let font_path = assets.join("fonts/NotoSans/NotoSans-Regular.ttf");
         ui.fonts.insert_from_file(font_path).unwrap();
 
-        let mut renderer = conrod::backend::gfx::Renderer::new( 
+        let renderer = conrod::backend::gfx::Renderer::new( 
             &mut factory, 
             &main_color, 
             (WIN_W, WIN_H), 
@@ -59,8 +59,6 @@ mod feature {
         fn load_rust_logo<R, C, F>(factory: &mut F) -> gfx::Texture<R>
             where R: gfx::gfx::Resources, C: gfx::gfx::CommandBuffer<R>, F: gfx::Factory<R, CommandBuffer = C>
         {
-            use self::gfx::gfx::Factory;
-
             let assets = find_folder::Search::ParentsThenKids(3, 3).for_folder("assets").unwrap();
             let path = assets.join("images/rust.png");
             let rgba_image = image::open(&std::path::Path::new(&path)).unwrap().to_rgba();
@@ -111,14 +109,16 @@ mod feature {
 
             // Draw the `Ui`.
             if let Some(primitives) = ui.draw_if_changed() {
+                use self::gfx::Factory;
                 use self::gfx::gfx::Device;
 
                 // Clear the window
                 encoder.clear(&main_color, [0.2, 0.2, 0.2, 1.0]);
                 encoder.flush(&mut device);
 
-                renderer.fill(&mut factory, primitives, &image_map, (WIN_W, WIN_H), window.hidpi_factor());
-
+                renderer.add_encoder(factory.create_encoder());
+                renderer.fill(primitives, &image_map, (WIN_W, WIN_H), window.hidpi_factor());
+                renderer.update_buffer(&mut factory);
                 let mut encoder = renderer.draw(&image_map).unwrap();
                 encoder.flush(&mut device);
 
